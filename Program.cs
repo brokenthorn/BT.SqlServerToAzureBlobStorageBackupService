@@ -9,4 +9,11 @@ IHostBuilder builder = Host
 
 IHost host = builder.Build();
 
-host.Run();
+try
+{
+    host.Run();
+}
+catch (Exception e)
+{
+    Console.WriteLine("Fatal error: {0}", e.Message);
+}
