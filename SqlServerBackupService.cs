@@ -102,13 +102,13 @@ namespace BT.SqlServerToAzureBlobStorageBackupService
                     return;
                 }
 
-                Console.WriteLine("Thread {0} ({1}) started.", Environment.CurrentManagedThreadId, Thread.CurrentThread.Name);
+                logger.LogInformation("Thread {CurrentManagedThreadId} ({Name}) started.", Environment.CurrentManagedThreadId, Thread.CurrentThread.Name);
 
                 while (!cancellationToken.IsCancellationRequested)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    Console.WriteLine("Thread {0} ({1}) tick...", Environment.CurrentManagedThreadId, Thread.CurrentThread.Name);
+                    logger.LogInformation("Thread {CurrentManagedThreadId} ({Name}) tick...", Environment.CurrentManagedThreadId, Thread.CurrentThread.Name);
 
                     var utcNow = DateTime.UtcNow;
                     var nextOccurrenceDate = cronExpression.GetNextOccurrence(utcNow);
@@ -116,15 +116,19 @@ namespace BT.SqlServerToAzureBlobStorageBackupService
 
                     if (timespanTillNextOccurrence != null && (nextOccurrenceDate > utcNow))
                     {
-                        Console.WriteLine("Thread {0} ({1}) sleeping for {2} seconds",
-                                          Environment.CurrentManagedThreadId,
-                                          Thread.CurrentThread.Name,
-                                          timespanTillNextOccurrence.Value.TotalSeconds);
+                        logger.LogInformation("Thread {CurrentManagedThreadId} ({Name}) sleeping for {TotalSeconds} seconds",
+                                              Environment.CurrentManagedThreadId,
+                                              Thread.CurrentThread.Name,
+                                              timespanTillNextOccurrence.Value.TotalSeconds);
+
                         Thread.Sleep(timespanTillNextOccurrence.Value);
                     }
                     else
                     {
-                        Console.WriteLine("Error with next occurrence...");
+                        logger.LogError("Thread {CurrentManagedThreadId} ({Name}) failed to get next occurrence.",
+                                        Environment.CurrentManagedThreadId,
+                                        Thread.CurrentThread.Name);
+
                         break;
                     }
 
@@ -133,7 +137,7 @@ namespace BT.SqlServerToAzureBlobStorageBackupService
                     // process work item                    
                 }
 
-                Console.WriteLine("Thread {0} ({1}) stopped.", Environment.CurrentManagedThreadId, Thread.CurrentThread.Name);
+                logger.LogInformation("Thread {CurrentManagedThreadId} ({Name}) stopped.", Environment.CurrentManagedThreadId, Thread.CurrentThread.Name);
             });
         }
 
@@ -167,45 +171,44 @@ namespace BT.SqlServerToAzureBlobStorageBackupService
 
         private void StopThreads()
         {
-            // try and let the threads exist by themselves:
+            _logger.LogInformation("Stopping all worker threads.");
+
             _threadsCancellationSource.Cancel();
+
             Thread.Sleep(1000);
 
-            // if some threads are still running, wait for them to finish:
-            foreach (var thread in _threads)
+            _threads.ForEach(t =>
             {
-                if (thread.IsAlive)
+                if (t.IsAlive)
                 {
-                    _logger.LogWarning("Thread {0} ({1}) is still alive. Waiting for it to finish.", thread.ManagedThreadId, thread.Name);
-                    thread.Join();
+                    _logger.LogWarning("Thread {ManagedThreadId} ({Name}) is still alive. Waiting for it to finish.", t.ManagedThreadId, t.Name);
+                    t.Join();
                 }
-            }
+            });
+
+            _logger.LogInformation("All worker threads stopped.");
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             StartThreads();
 
-            // make sure all threads get time to be scheduled before below condition gets checked:
-            await Task.Delay(2000);
-
-            if (_threads.Count != 0 &&
-                _threads.All(t => t.ThreadState == ThreadState.Running))
+            if (_threads.Count != 0)
             {
                 while (!stoppingToken.IsCancellationRequested)
                 {
-                    await Task.Delay(3000, stoppingToken);
+                    if (_threads.All(t => t.IsAlive))
+                        await Task.Delay(2000, stoppingToken);
+                    else
+                        break;
                 }
-
-                // stops the entire application when this service is stopped via the cancellation token:
-                _hostApplication.StopApplication();
             }
             else
             {
-                _logger.LogError("Not all worker threads were started. Stopping application.");
+                _logger.LogError("No worker threads were started. Check appsettings.json for existing configurations.");
             }
 
-            // stops the entire application when this service finished executing because no worker threads were started:
+            // stops the entire application when this service finishes executing:
             _hostApplication.StopApplication();
         }
 
@@ -218,7 +221,7 @@ namespace BT.SqlServerToAzureBlobStorageBackupService
 
         public override Task StopAsync(CancellationToken cancellationToken)
         {
-            _logger.LogInformation("SQL Server Backup Service is performing a graceful shutdown.");
+            _logger.LogInformation("SQL Server Backup Service is shutting down.");
 
             StopThreads();
 
