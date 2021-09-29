@@ -39,6 +39,7 @@ namespace BT.SqlServerToAzureBlobStorageBackupService
             if (sqlServersSection == null)
             {
                 _logger.LogError(FailedToLoadConfigEventId, FailedToLoadConfigErrorMessage);
+
                 throw new FailedToLoadConfigException(FailedToLoadConfigErrorMessage);
             }
 
@@ -47,12 +48,14 @@ namespace BT.SqlServerToAzureBlobStorageBackupService
             if (_sqlServerConfigs.Count == 0)
             {
                 _logger.LogError(EmptyConfigEventId, EmptyConfigErrorMessage);
+
                 throw new EmptyConfigException(EmptyConfigErrorMessage);
             }
 
             if (ListContainsSimilarlyNamedConfigs(_sqlServerConfigs))
             {
                 _logger.LogError(DuplicateSqlServerConfigEntriesFoundEventId, DuplicateSqlServerConfigEntriesFoundMessage);
+
                 throw new DuplicateSqlServerConfigException(DuplicateSqlServerConfigEntriesFoundMessage);
             }
 
@@ -100,12 +103,12 @@ namespace BT.SqlServerToAzureBlobStorageBackupService
                     return;
                 }
 
-                logger.LogInformation("Thread {CurrentManagedThreadId} ({Name}) started.", Environment.CurrentManagedThreadId, Thread.CurrentThread.Name);
+                logger.LogInformation("Thread {CurrentManagedThreadId} ({Name}) started.",
+                                      Environment.CurrentManagedThreadId,
+                                      Thread.CurrentThread.Name);
 
                 while (!cancellationToken.IsCancellationRequested)
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-
                     logger.LogInformation("Thread {CurrentManagedThreadId} ({Name}) tick...", Environment.CurrentManagedThreadId, Thread.CurrentThread.Name);
 
                     var utcNow = DateTime.UtcNow;
@@ -120,35 +123,25 @@ namespace BT.SqlServerToAzureBlobStorageBackupService
                                               timespanTillNextOccurrence.Value.TotalSeconds);
 
                         Thread.Sleep(timespanTillNextOccurrence.Value);
+
+                        cancellationToken.ThrowIfCancellationRequested();
+                        // TODO: now start doing the actual work...
                     }
                     else
                     {
-                        logger.LogError("Thread {CurrentManagedThreadId} ({Name}) failed to get next occurrence.",
+                        logger.LogError("Thread {CurrentManagedThreadId} ({Name}) failed to get its next occurrence.",
                                         Environment.CurrentManagedThreadId,
                                         Thread.CurrentThread.Name);
 
-                        break;
+                        break; // we could sleep 1s here instead of breaking, and let the code try getting next occurrence again...
                     }
-
-                    /* is more work pending */
-                    // dequeue work item
-                    // process work item                    
                 }
 
-                logger.LogInformation("Thread {CurrentManagedThreadId} ({Name}) stopped.", Environment.CurrentManagedThreadId, Thread.CurrentThread.Name);
+                logger.LogInformation("Thread {CurrentManagedThreadId} ({Name}) stopped.",
+                                      Environment.CurrentManagedThreadId,
+                                      Thread.CurrentThread.Name);
             });
         }
-
-        // Algo:
-        // 1. create a thread for each server to be backed up that is defined
-        // 2. make the threads aware of their particular schedule
-        // 3. when each thread is created, make them check if they should wait for the next run or run now
-        // 4. after each run, each thread must wait again until its next run (use the Cronos lib to determine when that is)
-        // this way the OS manages the thread resources
-        // store the threads in a dictionary, with the server names as keys
-        // when the stopping token is triggered, manually stop each thread.
-        // in the main thread, sleep for 2 seconds then check the token and repeat
-
 
         private void StartThreads()
         {
