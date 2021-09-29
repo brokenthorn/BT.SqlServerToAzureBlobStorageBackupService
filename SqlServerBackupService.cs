@@ -50,7 +50,7 @@ namespace BT.SqlServerToAzureBlobStorageBackupService
                 throw new EmptyConfigException(EmptyConfigErrorMessage);
             }
 
-            if (ListContainsDuplicateSqlServerConfigs(_sqlServerConfigs))
+            if (ListContainsSimilarlyNamedConfigs(_sqlServerConfigs))
             {
                 _logger.LogError(DuplicateSqlServerConfigEntriesFoundEventId, DuplicateSqlServerConfigEntriesFoundMessage);
                 throw new DuplicateSqlServerConfigException(DuplicateSqlServerConfigEntriesFoundMessage);
@@ -65,18 +65,16 @@ namespace BT.SqlServerToAzureBlobStorageBackupService
                                    names);
         }
 
-        private static bool ListContainsDuplicateSqlServerConfigs(List<SqlServerBackupConfig> configs)
+        private static bool ListContainsSimilarlyNamedConfigs(List<SqlServerBackupConfig> configs)
         {
-            if (configs.Count > 1)
+            if (configs.Count <= 1) return false;
+
+            for (int i = 0; i < configs.Count - 1; i++)
             {
-                foreach (var config in configs)
+                for (int j = 1; j < configs.Count; j++)
                 {
-                    if (configs
-                        .Count(c => string.Compare(c.Name, config.Name, StringComparison.InvariantCultureIgnoreCase) == 0)
-                        > 1)
-                    {
+                    if (string.Compare(configs[i].Name, configs[j].Name, StringComparison.InvariantCultureIgnoreCase) == 0)
                         return true;
-                    }
                 }
             }
 
