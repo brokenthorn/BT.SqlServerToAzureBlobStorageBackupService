@@ -1,13 +1,11 @@
 using Cronos;
 
+using System.Diagnostics;
+
 namespace BT.SqlServerToAzureBlobStorageBackupService
 {
     public class SqlServerBackupService : BackgroundService
     {
-        // Information log events:
-        private const string NewWorkerCreatedMessage = "New worker created.";
-        private readonly EventId NewWorkerCreatedEventId = new(1000, NewWorkerCreatedMessage);
-
         // Error log events:
         private const string FailedToLoadConfigErrorMessage = $"Failed to load {nameof(SqlServerBackupConfig)} from appsettings";
         private readonly EventId FailedToLoadConfigEventId = new(2000, FailedToLoadConfigErrorMessage);
@@ -18,23 +16,19 @@ namespace BT.SqlServerToAzureBlobStorageBackupService
         private const string DuplicateSqlServerConfigEntriesFoundMessage = $"Duplicate {nameof(SqlServerBackupConfig)} entries found";
         private readonly EventId DuplicateSqlServerConfigEntriesFoundEventId = new(2002, DuplicateSqlServerConfigEntriesFoundMessage);
 
-
         private readonly ILogger<SqlServerBackupService> _logger;
         private readonly IConfiguration _appConfiguration;
-        private readonly IHostApplicationLifetime _hostApplication;
-        private readonly List<SqlServerBackupConfig> _sqlServerConfigs;
+
+        private readonly List<SqlServerBackupConfig> _sqlServerConfigs = new();
         private readonly List<Thread> _threads = new();
 
-        private readonly CancellationTokenSource _threadsCancellationSource = new();
-
-        public SqlServerBackupService(ILogger<SqlServerBackupService> logger, IConfiguration configuration, IHostApplicationLifetime hostApplicationLifetime)
+        public SqlServerBackupService(ILogger<SqlServerBackupService> logger,
+                                      IConfiguration configuration)
         {
             _logger = logger;
             _appConfiguration = configuration;
-            _hostApplication = hostApplicationLifetime;
-            _sqlServerConfigs = new();
 
-            var sqlServersSection = _appConfiguration.GetSection("SqlServers");
+            var sqlServersSection = _appConfiguration.GetSection("SqlServerConfigs");
 
             if (sqlServersSection == null)
             {
@@ -61,22 +55,21 @@ namespace BT.SqlServerToAzureBlobStorageBackupService
 
             var names = string.Join(", ", _sqlServerConfigs.Select(c => $"\"{c.Name}\"").ToList());
 
-            _logger.LogInformation(NewWorkerCreatedEventId,
-                                   "{NewWorkerCreatedMessage} {Count} SQL Server backup configuration(s) loaded from appsettings called: {names}.",
-                                   NewWorkerCreatedMessage,
-                                   _sqlServerConfigs.Count,
-                                   names);
+            _logger.LogInformation("{Count} SQL Server backup configuration(s) loaded from appsettings called: {names}.", _sqlServerConfigs.Count, names);
         }
 
         private static bool ListContainsSimilarlyNamedConfigs(List<SqlServerBackupConfig> configs)
         {
-            if (configs.Count <= 1) return false;
+            if (configs.Count <= 1)
+                return false;
 
             for (int i = 0; i < configs.Count - 1; i++)
             {
                 for (int j = 1; j < configs.Count; j++)
                 {
-                    if (string.Compare(configs[i].Name, configs[j].Name, StringComparison.InvariantCultureIgnoreCase) == 0)
+                    if (string.Compare(configs[i].Name,
+                                       configs[j].Name,
+                                       StringComparison.InvariantCultureIgnoreCase) == 0)
                         return true;
                 }
             }
@@ -94,14 +87,21 @@ namespace BT.SqlServerToAzureBlobStorageBackupService
 
                 try
                 {
-                    cronExpression = CronExpression.Parse(sqlServerConfig.CronScheduleExpression, Cronos.CronFormat.IncludeSeconds);
+                    cronExpression = CronExpression.Parse(sqlServerConfig.CronScheduleExpression, CronFormat.IncludeSeconds);
                 }
                 catch (Exception e)
                 {
-                    logger.LogError("Failed to parse Cron expression for config with Name \"{Name}\": {Message}", sqlServerConfig.Name, e.Message);
+                    logger.LogError("Failed to parse Cron expression for config with Name \"{Name}\": {Message}",
+                                    sqlServerConfig.Name,
+                                    e.Message);
 
                     return;
                 }
+
+                // TODO: for each database in sqlServerConfig, create script
+                var sqlScripts = new List<string>() {
+                    $"BACKUP DATABASE {1} TO URL = N'{sqlServerConfig.Url}' WITH FORMAT, {(sqlServerConfig.UseCompression ? "COMPRESSION, " : null)}{(sqlServerConfig.CopyOnly ? "COPY_ONLY, " : null)}BLOCKSIZE={sqlServerConfig.BlockSize}, MAXTRANSFERSIZE={sqlServerConfig.MaxTransferSize};"
+                };
 
                 logger.LogInformation("Thread {CurrentManagedThreadId} ({Name}) started.",
                                       Environment.CurrentManagedThreadId,
@@ -109,23 +109,46 @@ namespace BT.SqlServerToAzureBlobStorageBackupService
 
                 while (!cancellationToken.IsCancellationRequested)
                 {
-                    logger.LogInformation("Thread {CurrentManagedThreadId} ({Name}) tick...", Environment.CurrentManagedThreadId, Thread.CurrentThread.Name);
-
                     var utcNow = DateTime.UtcNow;
                     var nextOccurrenceDate = cronExpression.GetNextOccurrence(utcNow);
-                    var timespanTillNextOccurrence = (nextOccurrenceDate - utcNow);
+                    var timespanTillNextOccurrence = nextOccurrenceDate - utcNow;
 
-                    if (timespanTillNextOccurrence != null && (nextOccurrenceDate > utcNow))
+                    if (timespanTillNextOccurrence is not null && (nextOccurrenceDate > utcNow))
                     {
-                        logger.LogInformation("Thread {CurrentManagedThreadId} ({Name}) sleeping for {TotalSeconds} seconds",
+                        var secondsToNextOccurrence = timespanTillNextOccurrence.Value.TotalSeconds;
+                        var sleepInterval = TimeSpan.FromSeconds(1);
+                        var timeSpanCounter = new TimeSpan(0);
+                        var shouldStop = false;
+
+                        // sleep till next occurrence, but wake up at predefined intervals in order to check for cancellation:
+                        while (timeSpanCounter.TotalSeconds < secondsToNextOccurrence)
+                        {
+                            logger.LogInformation("Thread {CurrentManagedThreadId} ({Name}) sleeping for {TotalSeconds} second(s)",
                                               Environment.CurrentManagedThreadId,
                                               Thread.CurrentThread.Name,
-                                              timespanTillNextOccurrence.Value.TotalSeconds);
+                                              sleepInterval.TotalSeconds);
 
-                        Thread.Sleep(timespanTillNextOccurrence.Value);
+                            Thread.Sleep(sleepInterval);
 
-                        cancellationToken.ThrowIfCancellationRequested();
+                            timeSpanCounter += TimeSpan.FromSeconds(1);
+
+                            if (cancellationToken.IsCancellationRequested)
+                            {
+                                shouldStop = true;
+                                break;
+                            }
+                                
+                        }
+
+                        if (shouldStop)
+                            break;
+
                         // TODO: now start doing the actual work...
+                        foreach (var script in sqlScripts)
+                        {
+                            // TODO: research if you can send more than one command to execute in parallel through one SqlConnection
+                            logger.LogInformation(script);
+                        }
                     }
                     else
                     {
@@ -143,69 +166,81 @@ namespace BT.SqlServerToAzureBlobStorageBackupService
             });
         }
 
-        private void StartThreads()
+        private void CreateThreads(CancellationToken cancellationToken, bool start = false)
         {
-            foreach (var config in _sqlServerConfigs)
+            _logger.LogInformation("Creating {AndStarting}all worker threads.", start ? "and starting " : null);
+
+            foreach (var sqlServerConfig in _sqlServerConfigs)
             {
-                var threadStartDelegate = CreateBackupJobThreadStartDelegate(config, _logger, _threadsCancellationSource.Token);
+                var threadStartDelegate = CreateBackupJobThreadStartDelegate(sqlServerConfig,
+                                                                             _logger,
+                                                                             cancellationToken);
 
-                var thread = new Thread(threadStartDelegate)
-                {
-                    Name = config.Name
-                };
-
-                if (!thread.IsAlive) thread.Start();
+                var thread = new Thread(threadStartDelegate) { Name = sqlServerConfig.Name };
 
                 _threads.Add(thread);
+
+                if (start) thread.Start();
             }
+
+            _logger.LogInformation("{Count} worker threads created{AndStarted}.", _threads.Count, start ? " and started" : null);
         }
 
-        private void StopThreads()
+        /// <summary>
+        /// Waits for all worker threads to stop up to the specified number of seconds.
+        /// If not all threads stopped by that time, logs a warning and returns.
+        /// </summary>
+        /// <param name="seconds"></param>
+        /// <returns></returns>
+        private async Task WaitForThreadsToStop(double seconds = 60)
         {
-            _logger.LogInformation("Stopping all worker threads.");
+            _logger.LogInformation("Waiting up to {seconds} seconds for all threads to stop.", seconds);
 
-            _threadsCancellationSource.Cancel();
+            var sw = new Stopwatch();
+            sw.Start();
 
-            Thread.Sleep(1000);
-
-            _threads.ForEach(t =>
+            while (_threads.Any(t => t.IsAlive))
             {
-                if (t.IsAlive)
-                {
-                    _logger.LogWarning("Thread {ManagedThreadId} ({Name}) is still alive. Waiting for it to finish.", t.ManagedThreadId, t.Name);
-                    t.Join();
-                }
-            });
+                await Task.Delay(1000);
 
-            _logger.LogInformation("All worker threads stopped.");
+                if (sw.Elapsed.TotalSeconds >= seconds)
+                {
+                    _logger.LogWarning("More than {TotalSeconds} have passed and not all threads stopped running. Not waiting any more.", seconds);
+
+                    sw.Stop();
+
+                    break;
+                }
+            }
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            StartThreads();
+
+            CreateThreads(stoppingToken, true);
 
             if (_threads.Count != 0)
             {
                 while (!stoppingToken.IsCancellationRequested)
                 {
+                    // keep the process running while all threads are alive:
                     if (_threads.All(t => t.IsAlive))
                         await Task.Delay(2000, stoppingToken);
                     else
                         break;
                 }
+
+                await WaitForThreadsToStop();
             }
             else
             {
                 _logger.LogError("No worker threads were started. Check appsettings.json for existing configurations.");
             }
-
-            // stops the entire application when this service finishes executing:
-            _hostApplication.StopApplication();
         }
 
         public override Task StartAsync(CancellationToken cancellationToken)
         {
-            _logger.LogInformation("SQL Server Backup Service is starting.");
+            _logger.LogInformation("SQL Server Backup Service is starting up.");
 
             return base.StartAsync(cancellationToken);
         }
@@ -213,8 +248,6 @@ namespace BT.SqlServerToAzureBlobStorageBackupService
         public override Task StopAsync(CancellationToken cancellationToken)
         {
             _logger.LogInformation("SQL Server Backup Service is shutting down.");
-
-            StopThreads();
 
             return base.StopAsync(cancellationToken);
         }
